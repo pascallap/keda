@@ -157,7 +157,10 @@ func NewRabbitMQScaler(config *ScalerConfig) (Scaler, error) {
 	}
 
 	if meta.createQueues != nil {
-		createQueues(ch, meta.createQueues)
+		err := createQueues(ch, meta.createQueues)
+		if err != nil {
+			return nil, fmt.Errorf("error while creating rabbitmq queues: %s", err)
+		}
 	}
 
 	return &rabbitMQScaler{
