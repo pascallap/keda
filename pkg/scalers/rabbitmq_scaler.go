@@ -52,6 +52,13 @@ const (
 	defaultOperation = sumOperation
 )
 
+const (
+	durableQueue    = true
+	autoDeleteQueue = false
+	exclusiveQueue  = false
+	noWaitQueue     = false
+)
+
 type rabbitMQScaler struct {
 	metadata   *rabbitMQMetadata
 	connection *amqp.Connection
@@ -60,18 +67,40 @@ type rabbitMQScaler struct {
 }
 
 type rabbitMQMetadata struct {
-	queueName   string
-	mode        string        // QueueLength or MessageRate
-	value       int           // trigger value (queue length or publish/sec. rate)
-	host        string        // connection string for either HTTP or AMQP protocol
-	protocol    string        // either http or amqp protocol
-	vhostName   *string       // override the vhost from the connection info
-	useRegex    bool          // specify if the queueName contains a rexeg
-	pageSize    int64         // specify the page size if useRegex is enabled
-	operation   string        // specify the operation to apply in case of multiples queues
-	metricName  string        // custom metric name for trigger
-	timeout     time.Duration // custom http timeout for a specific trigger
-	scalerIndex int           // scaler index
+	queueName    string
+	mode         string        // QueueLength or MessageRate
+	value        int           // trigger value (queue length or publish/sec. rate)
+	host         string        // connection string for either HTTP or AMQP protocol
+	protocol     string        // either http or amqp protocol
+	vhostName    *string       // override the vhost from the connection info
+	useRegex     bool          // specify if the queueName contains a rexeg
+	pageSize     int64         // specify the page size if useRegex is enabled
+	operation    string        // specify the operation to apply in case of multiples queues
+	metricName   string        // custom metric name for trigger
+	timeout      time.Duration // custom http timeout for a specific trigger
+	scalerIndex  int           // scaler index
+	createQueues []queuesToCreate
+}
+
+type queuesToCreate struct {
+	queueName     string          // Name of the queue to create
+	queueBindings []queueBindings // A list of topics to create
+	queueOptions  queueOptions
+}
+
+type queueOptions struct {
+	durable    bool
+	autoDelete bool
+	exclusive  bool
+	noWait     bool
+	args       amqp.Table
+}
+
+type queueBindings struct {
+	key      string
+	exchange string
+	noWait   bool
+	args     amqp.Table
 }
 
 type queueInfo struct {
@@ -127,12 +156,66 @@ func NewRabbitMQScaler(config *ScalerConfig) (Scaler, error) {
 		return nil, fmt.Errorf("error establishing rabbitmq connection: %s", err)
 	}
 
+	if meta.createQueues != nil {
+		createQueues(ch, meta.createQueues)
+	}
+
 	return &rabbitMQScaler{
 		metadata:   meta,
 		connection: conn,
 		channel:    ch,
 		httpClient: httpClient,
 	}, nil
+}
+
+func createQueues(ch *amqp.Channel, queues []queuesToCreate) error {
+	for _, q := range queues {
+		durable := durableQueue
+		if q.queueOptions.durable {
+			durable = q.queueOptions.durable
+		}
+		autoDelete := autoDeleteQueue
+		if q.queueOptions.autoDelete {
+			autoDelete = q.queueOptions.autoDelete
+		}
+		exclusive := exclusiveQueue
+		if q.queueOptions.exclusive {
+			exclusive = q.queueOptions.exclusive
+		}
+		noWait := noWaitQueue
+		if q.queueOptions.noWait {
+			noWait = q.queueOptions.noWait
+		}
+		args := amqp.Table{}
+		if q.queueOptions.args != nil {
+			args = q.queueOptions.args
+		}
+		_, err := ch.QueueDeclare(q.queueName, durable, autoDelete, exclusive, noWait, args)
+		if err == nil {
+			err = createQueueBindings(ch, q.queueName, q.queueBindings)
+		} else {
+			return fmt.Errorf("error creating queues: %s", err)
+		}
+	}
+	return nil
+}
+
+func createQueueBindings(ch *amqp.Channel, queueName string, queueBindings []queueBindings) error {
+	for _, binding := range queueBindings {
+		noWait := noWaitQueue
+		if binding.noWait {
+			noWait = binding.noWait
+		}
+		args := amqp.Table{}
+		if binding.args != nil {
+			args = binding.args
+		}
+		err := ch.QueueBind(queueName, binding.key, binding.exchange, noWait, args)
+		if err != nil {
+			return fmt.Errorf("error creating queue binding: %s", err)
+		}
+	}
+	return nil
 }
 
 func parseRabbitMQMetadata(config *ScalerConfig) (*rabbitMQMetadata, error) {
